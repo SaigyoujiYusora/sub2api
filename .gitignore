@@ -143,6 +143,7 @@ docs/*
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md
 !docs/cyber-session-blocking.md
+!docs/antigravity-codex-agent-messages.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
