@@ -111,7 +111,10 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 	}
 
 	var request apicompat.ResponsesRequest
-	if json.Unmarshal(body, &request) != nil {
+	// Codex delegation stores plaintext in encrypted_content parts. Normalize
+	// these before the Anthropic content whitelist drops the task body.
+	compatibleBody := apicompat.NormalizeCodexAgentMessagesForAntigravity(body)
+	if json.Unmarshal(compatibleBody, &request) != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 	}
 	if strings.TrimSpace(request.Model) == "" {

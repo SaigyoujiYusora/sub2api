@@ -198,6 +198,60 @@ func TestAntigravityCompatOAuthUsesNativeTokenAndRoute(t *testing.T) {
 	}
 }
 
+func TestAntigravityCompatResponsesPreservesCodexAgentMessages(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, stream := range []bool{false, true} {
+		name := "non-streaming"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"model":  "gemini-3.1-pro-high",
+				"stream": stream,
+				"input": []map[string]any{
+					{"type": "message", "role": "user", "content": "Initial context"},
+					{"type": "agent_message", "author": "/root", "recipient": "/root/designer", "content": []map[string]any{
+						{"type": "input_text", "text": "Payload:"},
+						{"type": "encrypted_content", "encrypted_content": "FIRST_TASK_715"},
+					}},
+					{"type": "message", "role": "assistant", "content": "First answer"},
+					{"type": "agent_message", "author": "/root", "recipient": "/root/designer", "content": []map[string]any{
+						{"type": "input_text", "text": "Payload:"},
+						{"type": "encrypted_content", "encrypted_content": "FOLLOWUP_TASK_826"},
+					}},
+				},
+			})
+			require.NoError(t, err)
+			original := bytes.Clone(body)
+			var upstreamBody []byte
+			upstream := &queuedHTTPUpstreamStub{
+				responses: []*http.Response{antigravityCompatSuccessResponse()},
+				onCall: func(req *http.Request, _ *queuedHTTPUpstreamStub) {
+					var readErr error
+					upstreamBody, readErr = io.ReadAll(req.Body)
+					require.NoError(t, readErr)
+				},
+			}
+			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+			c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/responses", body)
+
+			result, err := svc.ForwardAsResponses(context.Background(), c, newAntigravityCompatAccount(AccountTypeOAuth), body, nil)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, original, body)
+			contents := gjson.GetBytes(upstreamBody, "request.contents").String()
+			for _, text := range []string{"Initial context", "FIRST_TASK_715", "First answer", "FOLLOWUP_TASK_826"} {
+				require.Equal(t, 1, strings.Count(contents, text), "upstream contents: %s", contents)
+			}
+			require.NotContains(t, contents, "encrypted_content")
+		})
+	}
+}
+
 func TestAntigravityCompatRejectsUnsupportedAccountType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
