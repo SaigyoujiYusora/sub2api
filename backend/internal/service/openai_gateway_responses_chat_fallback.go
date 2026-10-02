@@ -161,6 +161,9 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
 	if err != nil {
 		return nil, err
 	}
+	if c.GetBool(portableCompactionCaptureKey) {
+		c.Set(portableCompactionCompleteKey, len(ccResp.Choices) == 1 && ccResp.Choices[0].FinishReason == "stop")
+	}
 	responsesResp := apicompat.ChatCompletionsResponseToResponses(ccResp, originalModel, customTools, functionTools, toolSearch, namespaceTools)
 	s.cacheReasoningItemsFromOutput(responsesResp.Output)
 

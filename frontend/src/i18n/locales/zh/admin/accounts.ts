@@ -836,6 +836,7 @@ export default {
         modelRestrictionDisabledByPassthrough: '已开启自动透传：模型白名单/映射不会生效。',
       },
       grok: {
+        compactModelMappingDesc: '指定 Grok 常规压缩使用的摘要模型，例如 grok-* → gpt-6-luna。目标需是分组允许的 GPT 文本模型，返回明文摘要。留空则由 Grok 自己生成摘要。',
         baseUrlHint: 'Grok OAuth 账号会转发到官方 xAI API Base URL。',
         apiKeyHint: 'Grok 订阅支持使用 OAuth refresh token；API Key 账号不在本次范围内。',
         // 账号连通性测试弹窗

@@ -35,6 +35,29 @@ func (s *GatewayService) ForwardAsResponses(
 	body []byte,
 	parsed *ParsedRequest,
 ) (*ForwardResult, error) {
+	normalized, _, err := normalizeOpenAIResponsesLegacyIngress(body)
+	if err != nil {
+		return nil, err
+	}
+	expanded, _, err := ExpandPortableCompactionInputs(normalized, false)
+	if err != nil {
+		writePortableCompactionError(c, http.StatusBadRequest, err)
+		return nil, err
+	}
+	if isPortableCompactionRequest(c, expanded) {
+		model := account.GetMappedModel(gjson.GetBytes(expanded, "model").String())
+		result, err := forwardPortableCompaction(ctx, c, expanded, model, func(innerCtx context.Context, inner *gin.Context, summary []byte) (*ForwardResult, error) {
+			return s.forwardAsResponses(innerCtx, inner, account, summary, parsed)
+		})
+		if result != nil {
+			result.Stream = gjson.GetBytes(body, "stream").Bool()
+		}
+		return result, err
+	}
+	return s.forwardAsResponses(ctx, c, account, expanded, parsed)
+}
+
+func (s *GatewayService) forwardAsResponses(ctx context.Context, c *gin.Context, account *Account, body []byte, parsed *ParsedRequest) (*ForwardResult, error) {
 	startTime := time.Now()
 
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngress(body)
@@ -388,6 +411,9 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 	// Accumulate the final Anthropic response from streaming events
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
+	portableCapture := c.GetBool(portableCompactionCaptureKey)
+	sawMessageStop := false
+	validStream := true
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -408,12 +434,16 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 
 		var event apicompat.AnthropicStreamEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			validStream = false
 			logger.L().Warn("forward_as_responses buffered: failed to parse event",
 				zap.Error(err),
 				zap.String("request_id", requestID),
 				zap.String("event_type", eventType),
 			)
 			continue
+		}
+		if event.Type == "message_stop" {
+			sawMessageStop = true
 		}
 
 		// message_start carries the initial response structure
@@ -454,12 +484,18 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 	}
 
 	if err := scanner.Err(); err != nil {
+		validStream = false
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			logger.L().Warn("forward_as_responses buffered: read error",
 				zap.Error(err),
 				zap.String("request_id", requestID),
 			)
 		}
+	}
+	if portableCapture {
+		complete := validStream && sawMessageStop && finalResp != nil && finalResp.StopReason != nil &&
+			(*finalResp.StopReason == "end_turn" || *finalResp.StopReason == "stop_sequence")
+		c.Set(portableCompactionCompleteKey, complete)
 	}
 
 	if finalResp == nil {

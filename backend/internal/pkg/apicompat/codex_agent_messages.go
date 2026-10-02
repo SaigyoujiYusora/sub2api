@@ -85,3 +85,10 @@ func rewriteCodexAgentMessageContent(payload []byte) []byte {
 func NormalizeCodexAgentMessagesForAntigravity(payload []byte) []byte {
 	return rewriteCodexAgentMessageInput(payload)
 }
+
+// NormalizeCodexAgentMessagesForResponses makes Codex delegation items portable
+// for Responses providers that do not understand agent_message. Only the
+// delegation envelope is rewritten; encrypted reasoning items remain untouched.
+func NormalizeCodexAgentMessagesForResponses(payload []byte) []byte {
+	return rewriteCodexAgentMessageInput(payload)
+}

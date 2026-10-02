@@ -1037,6 +1037,11 @@ type GatewayConfig struct {
 	// OpenAICompactModel: /responses/compact 上游使用的模型。
 	// compact 端点支持模型滞后于普通 /responses 时，可用该配置降级规避上游错误。
 	OpenAICompactModel string `mapstructure:"openai_compact_model"`
+	// PortableConversionModel generates ordinary plaintext handoffs for native checkpoints.
+	// Empty disables on-demand conversion. It never invokes the native compact endpoint.
+	PortableConversionModel string `mapstructure:"portable_conversion_model"`
+	// PortableSummaryModelMapping routes non-native compaction to a normal inference model.
+	PortableSummaryModelMapping map[string]string `mapstructure:"portable_summary_model_mapping"`
 	// OpenAIWS: OpenAI Responses WebSocket 配置（默认开启，可按需回滚到 HTTP）
 	OpenAIWS GatewayOpenAIWSConfig `mapstructure:"openai_ws"`
 	// Live: ChatGPT Frameless Live 会话配置。
@@ -2433,6 +2438,8 @@ func setDefaults() {
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
 	viper.SetDefault("gateway.openai_compact_model", "gpt-5.5")
+	viper.SetDefault("gateway.portable_conversion_model", "gpt-6-luna")
+	viper.SetDefault("gateway.portable_summary_model_mapping", map[string]string{})
 	viper.SetDefault("gateway.live.max_session_duration_seconds", 3600)
 	// OpenAI Responses WebSocket（默认开启；可通过 force_http 紧急回滚）
 	viper.SetDefault("gateway.openai_ws.enabled", true)

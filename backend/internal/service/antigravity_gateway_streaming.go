@@ -830,6 +830,9 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 	var lastWithParts map[string]any
 	var collectedParts []map[string]any // 收集所有 parts（包括 text、thinking、functionCall、inlineData 等）
 	var meaningfulResponse bool
+	portableCapture := c.GetBool(portableCompactionCaptureKey)
+	validPortableStream := true
+	portableFinishReason := ""
 
 	type scanEvent struct {
 		line string
@@ -891,6 +894,10 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.antigravity_gateway", "SSE line too long (antigravity claude non-stream): max_size=%d error=%v", maxLineSize, ev.err)
 				}
+				if portableCapture && meaningfulResponse {
+					validPortableStream = false
+					goto returnResponse
+				}
 				return nil, nil, ev.err
 			}
 
@@ -909,16 +916,21 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 			// 解包 v1internal 响应
 			inner, parseErr := s.unwrapV1InternalResponse([]byte(payload))
 			if parseErr != nil {
+				validPortableStream = false
 				continue
 			}
 			upstreamResponseModelObserverFromContext(c).ObserveGemini(inner)
 
 			var parsed map[string]any
 			if err := json.Unmarshal(inner, &parsed); err != nil {
+				validPortableStream = false
 				continue
 			}
 
 			last = parsed
+			if finishReason := strings.TrimSpace(extractGeminiFinishReason(parsed)); finishReason != "" {
+				portableFinishReason = finishReason
+			}
 
 			// 保留最后一个有 parts 的响应，并收集所有 parts
 			parts := extractGeminiParts(parsed)
@@ -942,11 +954,18 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 				continue
 			}
 			logger.LegacyPrintf("service.antigravity_gateway", "Stream data interval timeout (antigravity claude non-stream)")
+			if portableCapture && meaningfulResponse {
+				validPortableStream = false
+				goto returnResponse
+			}
 			return nil, nil, fmt.Errorf("stream data interval timeout")
 		}
 	}
 
 returnResponse:
+	if portableCapture {
+		c.Set(portableCompactionCompleteKey, validPortableStream && portableFinishReason == "STOP")
+	}
 	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
 	if !meaningfulResponse {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (claude non-stream), triggering failover")

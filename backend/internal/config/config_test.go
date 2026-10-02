@@ -584,6 +584,8 @@ func TestLoadDefaultOpenAICompactModel(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, "gpt-5.5", cfg.Gateway.OpenAICompactModel)
+	require.Equal(t, "gpt-6-luna", cfg.Gateway.PortableConversionModel)
+	require.Empty(t, cfg.Gateway.PortableSummaryModelMapping)
 }
 
 func TestLoadOpenAICompactModelFromEnv(t *testing.T) {

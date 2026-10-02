@@ -727,6 +727,7 @@ export default {
         modelRestrictionDisabledByPassthrough: 'Automatic passthrough is enabled: model whitelist/mapping will not take effect.',
       },
       grok: {
+        compactModelMappingDesc: 'Choose the summary model for Grok compaction, for example grok-* → gpt-6-luna. The target must be an allowed GPT text model and returns a plaintext summary. Leave empty to use Grok itself.',
         baseUrlHint: 'Grok OAuth accounts forward to the official xAI API base URL.',
         apiKeyHint: 'Grok subscription support uses OAuth refresh tokens; API keys are out of scope for this account type.',
         // Account connectivity test modal

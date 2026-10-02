@@ -76,6 +76,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
+	if service.IsPortableSummaryInference(c.Request.Context()) {
+		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "plaintext summary requires a native OpenAI Responses model")
+		return
+	}
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel) {
@@ -162,7 +166,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		h.responsesErrorResponse(c, status, code, message)
 		return
 	}
-	defer inflightRelease()
+	defer func() { inflightRelease() }()
 
 	// Parse request for session hash
 	bodyRef := service.NewRequestBodyRef(body)
@@ -220,6 +224,43 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			}
 		}
 		account := selection.Account
+		planBody := body
+		if channelMapping.Mapped {
+			planBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
+		}
+		if plan := service.PlanPortableCompaction(c, account, planBody); plan != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			inflightRelease()
+			inflightRelease = func() {}
+			nextBody, finished, summaryErr := executePortableCompactionPlan(c, plan, apiKey, planBody)
+			if summaryErr != nil {
+				service.WritePortableCompactionError(c, summaryErr)
+				return
+			}
+			if finished {
+				return
+			}
+			// Restore the client model; the normal channel mapping is applied again.
+			body = h.gatewayService.ReplaceModelInBody(nextBody, reqModel)
+			bodyRef = service.NewRequestBodyRef(body)
+			parsedReq.Body = bodyRef
+			if err := h.billingCacheService.RecheckBillingEligibility(requestCtx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(requestCtx, apiKey)); err != nil {
+				status, code, message, _ := billingErrorDetails(err)
+				h.responsesErrorResponse(c, status, code, message)
+				return
+			}
+			inflightRelease, err = reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+			if err != nil {
+				inflightRelease = func() {}
+				status, code, message, _ := billingErrorDetails(err)
+				h.responsesErrorResponse(c, status, code, message)
+				return
+			}
+			continue
+		}
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		// 4. Acquire account concurrency slot
@@ -296,7 +337,35 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			accountReleaseFunc()
 		}
 
+		submitResponsesUsage := func(res *service.ForwardResult) {
+			if res == nil {
+				return
+			}
+			userAgent := c.GetHeader("User-Agent")
+			clientIP := ip.GetClientIP(c)
+			requestPayloadHash := service.HashUsageRequestPayload(body)
+			inboundEndpoint := GetInboundEndpoint(c)
+			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
+			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+			sessionID := service.ExtractClientSessionID(c)
+			stampForwardRequestedReasoningEffort(res, service.RequestedReasoningEffortFromContext(c.Request.Context()))
+			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+					Result: res, QuotaPlatform: quotaPlatform, APIKey: apiKey, User: apiKey.User,
+					Account: account, Subscription: subscription, PricingAt: pricingAt,
+					InboundEndpoint: inboundEndpoint, UpstreamEndpoint: upstreamEndpoint,
+					UserAgent: userAgent, IPAddress: clientIP, RequestPayloadHash: requestPayloadHash,
+					APIKeyService: h.apiKeyService, SessionID: sessionID,
+					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
+				}); err != nil {
+					reqLog.Error("gateway.responses.record_usage_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				}
+			})
+		}
 		if err != nil {
+			if service.IsPortableCompactionResponseError(err) {
+				submitResponsesUsage(result)
+			}
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
 				// Can't failover if streaming content already sent
@@ -330,40 +399,8 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 
-		// 6. Record usage
-		userAgent := c.GetHeader("User-Agent")
-		clientIP := ip.GetClientIP(c)
-		requestPayloadHash := service.HashUsageRequestPayload(body)
-		inboundEndpoint := GetInboundEndpoint(c)
-		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
-
-		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
-		sessionID := service.ExtractClientSessionID(c)
-		stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
-		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
-			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
-				Result:             result,
-				QuotaPlatform:      quotaPlatform,
-				APIKey:             apiKey,
-				User:               apiKey.User,
-				Account:            account,
-				Subscription:       subscription,
-				PricingAt:          pricingAt,
-				InboundEndpoint:    inboundEndpoint,
-				UpstreamEndpoint:   upstreamEndpoint,
-				UserAgent:          userAgent,
-				IPAddress:          clientIP,
-				RequestPayloadHash: requestPayloadHash,
-				APIKeyService:      h.apiKeyService,
-				SessionID:          sessionID,
-				ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
-			}); err != nil {
-				reqLog.Error("gateway.responses.record_usage_failed",
-					zap.Int64("account_id", account.ID),
-					zap.Error(err),
-				)
-			}
-		})
+		// 6. Record successful inference, or metered portable validation failures above.
+		submitResponsesUsage(result)
 		return
 	}
 }

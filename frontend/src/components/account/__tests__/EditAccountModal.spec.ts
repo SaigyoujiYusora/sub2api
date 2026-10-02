@@ -1053,6 +1053,28 @@ describe('EditAccountModal', () => {
     })
   })
 
+  it.each(['oauth', 'apikey'])('Grok %s can choose and clear its compaction summary model', async (type) => {
+    const account = type === 'oauth' ? buildGrokOAuthAccount() : buildGrokAPIKeyAccount()
+    account.credentials.compact_model_mapping = { 'grok-*': 'gpt-6-luna' }
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.text()).toContain('admin.accounts.grok.compactModelMappingDesc')
+    expect(wrapper.text()).not.toContain('admin.accounts.openai.compactModeDesc')
+    expect(wrapper.get('[data-testid="compact-model-mapping-from"]').element.value).toBe('grok-*')
+    await wrapper.get('[data-testid="compact-model-mapping-to"]').setValue('gpt-5.6-luna')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.lastCall?.[1]?.credentials?.compact_model_mapping).toEqual({ 'grok-*': 'gpt-5.6-luna' })
+    wrapper.unmount()
+
+    const clearing = mountModal(account)
+    const remove = clearing.get('[data-testid="compact-model-mapping-to"]').element.parentElement?.querySelector('button')
+    expect(remove).toBeTruthy()
+    remove?.click()
+    await clearing.vm.$nextTick()
+    await clearing.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.lastCall?.[1]?.credentials?.compact_model_mapping).toEqual({})
+  })
+
   it('uses the official xAI base URL when a Grok API-key account omits base_url', async () => {
     const account = buildGrokAPIKeyAccount()
     updateAccountMock.mockReset()

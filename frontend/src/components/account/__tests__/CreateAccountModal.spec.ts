@@ -214,6 +214,20 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it('Grok API key creation saves the user-selected compaction model', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Grok')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Grok account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="compact-model-mapping-add"]').trigger('click')
+    await wrapper.get('[data-testid="compact-model-mapping-from"]').setValue('grok-*')
+    await wrapper.get('[data-testid="compact-model-mapping-to"]').setValue('gpt-6-luna')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(createAccountMock.mock.lastCall?.[0]?.credentials?.compact_model_mapping).toEqual({ 'grok-*': 'gpt-6-luna' })
+  })
+
   it('sets month and year expiry presets without submitting the account form', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-01-31T12:34:00'))

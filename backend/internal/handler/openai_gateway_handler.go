@@ -626,7 +626,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		h.handleStreamingAwareError(c, status, code, message, streamStarted)
 		return
 	}
-	defer inflightRelease()
+	defer func() { inflightRelease() }()
 
 	// Generate session hash (header first; fallback to prompt_cache_key)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
@@ -655,6 +655,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 该判断已排除 Codex 被动 image_gen namespace，避免 CC-only 账号被误过滤（#4476）。
 	needsResponses := nativeV2 || legacyCompact
 	requiredCapability := openAIResponsesRequiredCapabilityForRequest(imageIntent, needsResponses, requestPlatform)
+	if nativeV2 {
+		// Non-GPT summaries can use CC-only accounts. Validate native GPT
+		// capability after account mapping resolves the actual target model.
+		requiredCapability = service.OpenAIEndpointCapabilityChatCompletions
+	}
+	if service.IsPortableSummaryInference(c.Request.Context()) {
+		requiredCapability = service.OpenAIEndpointCapabilityResponses
+	}
 
 	// 分组利润控制：请求级装配定价上下文——pricingAt 固定本请求的
 	// D 与计费高峰因子，选号、槽位终检与全部 failover 重入共用同一门与阈值。
@@ -737,6 +745,46 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if service.IsPortableSummaryInference(c.Request.Context()) && (!service.UsesNativeGPTCompaction(account, service.ResolveOpenAIAccountUpstreamModelForRequest(account, forwardModel, false)) || !account.SupportsOpenAIEndpointCapability(service.OpenAIEndpointCapabilityResponses)) {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "plaintext summary requires a native OpenAI Responses model", streamStarted)
+			return
+		}
+		if plan := service.PlanPortableCompaction(c, account, forwardBody); plan != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			inflightRelease()
+			inflightRelease = func() {}
+			nextBody, finished, summaryErr := executePortableCompactionPlan(c, plan, apiKey, forwardBody)
+			if summaryErr != nil {
+				service.WritePortableCompactionError(c, summaryErr)
+				return
+			}
+			if finished {
+				return
+			}
+			forwardBody = nextBody
+			// Recheck balance and reserve against the expanded body, then reselect
+			// the real destination rather than reusing the released account slot.
+			if err := h.billingCacheService.RecheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+				status, code, message, _ := billingErrorDetails(err)
+				h.handleStreamingAwareError(c, status, code, message, streamStarted)
+				return
+			}
+			inflightRelease, err = reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, forwardBody))
+			if err != nil {
+				inflightRelease = func() {}
+				status, code, message, _ := billingErrorDetails(err)
+				h.handleStreamingAwareError(c, status, code, message, streamStarted)
+				return
+			}
+			continue
+		}
 		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead
@@ -758,6 +806,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Int64("account_id", account.ID),
 				zap.String("account_type", account.Type),
 			)
+			continue
+		}
+		if nativeV2 && service.UsesNativeGPTCompaction(account, service.ResolveOpenAIAccountUpstreamModelForRequest(account, forwardModel, false)) &&
+			!account.SupportsOpenAIEndpointCapability(service.OpenAIEndpointCapabilityResponses) {
+			failedAccountIDs[account.ID] = struct{}{}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
 			continue
 		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
@@ -2075,6 +2131,9 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 	reqLog *zap.Logger,
 ) (func(), bool) {
 	ctx := c.Request.Context()
+	if key, ok := middleware2.GetAPIKeyFromContext(c); ok && service.BorrowPortableSummaryUserSlot(ctx, userID, key.ID) {
+		return nil, true
+	}
 	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, userConcurrency, reqStream, streamStarted)
 	if err != nil {
 		reqLog.Warn("openai.user_slot_acquire_failed", zap.Error(err))
@@ -3363,6 +3422,10 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 }
 
 func (h *OpenAIGatewayHandler) submitOpenAIUsageRecordTask(parent context.Context, result *service.OpenAIForwardResult, task service.UsageRecordTask) {
+	if service.IsPortableSummaryInference(parent) {
+		h.submitMandatoryUsageRecordTask(parent, task)
+		return
+	}
 	// Money-critical bills never drop on pool overflow: media, search surcharge, voice.
 	if result != nil && (result.ImageCount > 0 || result.VideoCount > 0 ||
 		result.SearchCount > 0 || result.WebSearchCalls > 0 || result.AudioUsage != nil) {

@@ -82,10 +82,10 @@ func TestOpenAIGatewayForwardUsesGlobalCompactModelOnInitialLegacyRequest(t *tes
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compact","status":"completed","model":"global-compact","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compact","status":"completed","model":"gpt-global-compact","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
 	}}
 	svc := &OpenAIGatewayService{
-		cfg:          &config.Config{Gateway: config.GatewayConfig{OpenAICompactModel: "global-compact"}},
+		cfg:          &config.Config{Gateway: config.GatewayConfig{OpenAICompactModel: "gpt-global-compact"}},
 		httpUpstream: upstream,
 	}
 	account := &Account{
@@ -99,7 +99,7 @@ func TestOpenAIGatewayForwardUsesGlobalCompactModelOnInitialLegacyRequest(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, upstream.bodies, 1)
-	require.Equal(t, "global-compact", gjson.GetBytes(upstream.bodies[0], "model").String())
+	require.Equal(t, "gpt-global-compact", gjson.GetBytes(upstream.bodies[0], "model").String())
 	require.Contains(t, upstream.requests[0].URL.Path, "/compact")
 }
 

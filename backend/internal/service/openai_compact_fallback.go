@@ -254,6 +254,11 @@ func (s *OpenAIGatewayService) prepareOpenAICompactFallbackRetry(
 	if fallbackModel == "" || strings.EqualFold(fallbackModel, currentModel) {
 		return currentBody, "", false
 	}
+	// This retry stays inside the native forward loop and cannot rebuild a
+	// portable summary or validate ciphertext against a different provider.
+	if UsesNativeGPTCompaction(account, currentModel) != UsesNativeGPTCompaction(account, fallbackModel) {
+		return currentBody, "", false
+	}
 	retryBody := ReplaceModelInBody(currentBody, fallbackModel)
 	if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(retryBody, "model").String()), currentModel) {
 		return currentBody, "", false

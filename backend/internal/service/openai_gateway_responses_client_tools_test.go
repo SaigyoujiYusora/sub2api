@@ -191,7 +191,7 @@ func TestDeepSeekAdaptiveResponsesForwardRestoresClientToolsNonStreaming(t *test
 	require.Equal(t, "*** Begin Patch", gjson.Get(recorder.Body.String(), "output.1.input").String())
 }
 
-func TestDeepSeekResponsesCompactSkipsClientToolAdaptation(t *testing.T) {
+func TestDeepSeekResponsesCompactUsesToolFreePortableSummary(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := openAIClientToolsRequest(false)
 	recorder := httptest.NewRecorder()
@@ -201,7 +201,7 @@ func TestDeepSeekResponsesCompactSkipsClientToolAdaptation(t *testing.T) {
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compact","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_compact","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"summary"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`)),
 	}}
 	svc := openAIClientToolsTestService(upstream)
 	account := &Account{
@@ -218,8 +218,9 @@ func TestDeepSeekResponsesCompactSkipsClientToolAdaptation(t *testing.T) {
 	_, err := svc.Forward(context.Background(), c, account, body)
 
 	require.NoError(t, err)
-	require.Equal(t, "custom", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
-	require.Equal(t, "/responses/compact", upstream.lastReq.URL.Path)
+	require.False(t, gjson.GetBytes(upstream.lastBody, "tools").Exists())
+	require.Equal(t, "/responses", upstream.lastReq.URL.Path)
+	require.Contains(t, gjson.Get(recorder.Body.String(), "output.0.encrypted_content").String(), portableCompactionPrefix)
 }
 
 func TestOpenAIPassthroughAPIKeyRestoresClientToolsNonStreaming(t *testing.T) {

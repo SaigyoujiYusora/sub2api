@@ -856,6 +856,19 @@ describe('BulkEditAccountModal', () => {
     })
   })
 
+  it('Grok 批量编辑可以指定压缩摘要模型', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['grok'], selectedTypes: ['oauth', 'apikey'] })
+    expect(wrapper.find('#bulk-edit-openai-compact-mode-enabled').exists()).toBe(false)
+    await wrapper.get('#bulk-edit-openai-compact-model-mapping-enabled').setValue(true)
+    await wrapper.get('[data-testid="bulk-edit-openai-compact-model-mapping-add"]').trigger('click')
+    const inputs = wrapper.findAll('[data-testid="bulk-edit-openai-compact-model-mapping-input"]')
+    await inputs[0].setValue('grok-*')
+    await inputs[1].setValue('gpt-6-luna')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate.mock.lastCall?.[1]?.credentials?.compact_model_mapping).toEqual({ 'grok-*': 'gpt-6-luna' })
+  })
+
   it('OpenAI 账号批量编辑可关闭自动透传', async () => {
     const wrapper = mountModal({
       selectedPlatforms: ['openai'],

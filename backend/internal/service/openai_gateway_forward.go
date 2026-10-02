@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -19,6 +20,55 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	normalized, _, err := normalizeOpenAIResponsesLegacyIngress(body)
+	if err != nil {
+		return nil, err
+	}
+	requestedModel := gjson.GetBytes(normalized, "model").String()
+	legacyCompact := isOpenAIResponsesCompactPath(c)
+	model := resolveOpenAIAccountUpstreamModelForRequest(account, requestedModel, legacyCompact)
+	if legacyCompact && !shouldForwardOpenAIResponsesViaRawChatCompletions(account) && UsesNativeGPTCompaction(account, resolveOpenAIAccountUpstreamModelForRequest(account, requestedModel, false)) {
+		if fallback := s.resolveOpenAICompactFallbackModel(account, requestedModel); fallback != "" {
+			model = fallback
+		}
+	}
+	native := UsesNativeGPTCompaction(account, model)
+	if IsPortableSummaryInference(ctx) && (!native || shouldForwardOpenAIResponsesViaRawChatCompletions(account) || isPortableCompactionRequest(c, normalized)) {
+		return nil, fmt.Errorf("plaintext summary requires ordinary native OpenAI Responses inference")
+	}
+	expanded, _, err := ExpandPortableCompactionInputs(normalized, native)
+	if err != nil {
+		writePortableCompactionError(c, http.StatusBadRequest, err)
+		return nil, err
+	}
+	if isPortableCompactionRequest(c, expanded) && !native && !isOpenAIImageModel(model) {
+		summaryAccount := account
+		if legacyCompact {
+			// The inner ordinary request must use the already-resolved compact model.
+			// A request-local mapping avoids mutating the scheduled account's cache.
+			copyAccount := *account
+			copyAccount.Credentials = make(map[string]any, len(account.Credentials)+1)
+			for key, value := range account.Credentials {
+				copyAccount.Credentials[key] = value
+			}
+			copyAccount.Credentials["model_mapping"] = map[string]any{requestedModel: model}
+			summaryAccount = &copyAccount
+			if account.IsOpenAIPassthroughEnabled() {
+				expanded = s.ReplaceModelInBody(expanded, model)
+			}
+		}
+		result, err := forwardPortableCompaction(ctx, c, expanded, model, func(innerCtx context.Context, inner *gin.Context, summary []byte) (*OpenAIForwardResult, error) {
+			return s.forwardResponses(innerCtx, inner, summaryAccount, summary)
+		})
+		if result != nil {
+			result.Stream = gjson.GetBytes(body, "stream").Bool()
+		}
+		return result, err
+	}
+	return s.forwardResponses(ctx, c, account, expanded)
+}
+
+func (s *OpenAIGatewayService) forwardResponses(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
@@ -197,6 +247,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+	}
+	// Command Code accepts Responses but silently ignores Codex agent_message
+	// items, including both initial delegation and follow-up task payloads.
+	if account.IsOpenAIApiKey() && !compactPath && isOfficialCommandCodeHost(account.GetOpenAIBaseURL()) {
+		body = apicompat.NormalizeCodexAgentMessagesForResponses(body)
+		body = dropCommandCodeUnansweredToolCalls(body)
+		originalBody = body
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
 	if account.IsOpenAI() && (account.IsOpenAIApiKey() || account.IsOpenAIOAuthLike()) {
@@ -746,7 +803,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	lineageGroupID := getOpenAIGroupIDFromContext(c)
 	lineageEntryBody := body
 	lineageSessionHash := ""
-	if stateStore := s.getOpenAIWSStateStore(); stateStore != nil && stateStore.HasAnySessionInvalidEncryptedContent() {
+	if stateStore := s.getOpenAIWSStateStore(); !IsPortableSummaryInference(ctx) && stateStore != nil && stateStore.HasAnySessionInvalidEncryptedContent() {
 		lineageSessionHash = s.GenerateSessionHash(c, body)
 		if invalidDigests := stateStore.GetSessionInvalidEncryptedContentDigests(lineageGroupID, lineageSessionHash); len(invalidDigests) > 0 {
 			strippedBody, strippedCount := s.stripSessionInvalidEncryptedContentLogged(
@@ -843,7 +900,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return true
 		}
 		recoverInvalidEncryptedContent := func(attempt int) bool {
-			if wsInvalidEncryptedContentRecoveryTried {
+			if IsPortableSummaryInference(ctx) || wsInvalidEncryptedContentRecoveryTried {
 				return false
 			}
 			// 写入 lineage 后，同一失效密文在后续 turn 进场时被预剥离，不再重复
@@ -1036,10 +1093,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	httpInvalidEncryptedContentRetryTried := false
 	compactModelFallbackRetried := false
 	agentTaskRecoveryTried := false
+	commandCodeTransient400Retries := 0
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	for {
 		// Build upstream request
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		upstreamCtx, releaseUpstreamCtx := ctx, func() {}
+		if !IsPortableSummaryInference(ctx) {
+			upstreamCtx, releaseUpstreamCtx = detachUpstreamContext(ctx)
+		}
 		var headerGuard *openAIFirstOutputHeaderGuard
 		if firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
@@ -1103,6 +1164,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
+			if commandCodeTransient400Retries < commandCodeTransient400MaxRetries && isCommandCodeTransient400(account, resp.StatusCode, respBody) {
+				commandCodeTransient400Retries++
+				timer := time.NewTimer(time.Duration(commandCodeTransient400Retries) * 200 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, ctx.Err()
+				case <-timer.C:
+				}
+				logger.LegacyPrintf("service.openai_gateway", "[CommandCode] Retrying opaque transient 400 without changing request (account_id=%d retry=%d max_retries=%d)", account.ID, commandCodeTransient400Retries, commandCodeTransient400MaxRetries)
+				continue
+			}
 			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 				agentTaskRecoveryTried = true
 				expectedTaskID := account.GetCredential("task_id")
@@ -1113,7 +1186,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			respBody = s.redactAgentIdentitySensitiveBody(ctx, account, respBody)
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
-			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
+			if !IsPortableSummaryInference(ctx) && !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
 				decoded, decodeErr := ensureReqBody()
 				if decodeErr != nil {
 					return nil, decodeErr

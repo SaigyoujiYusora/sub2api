@@ -2373,10 +2373,10 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="(account?.platform === 'openai' || account?.platform === 'grok') && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
-        <div class="flex items-center justify-between">
+        <div v-if="account?.platform === 'openai'" class="flex items-center justify-between">
           <div>
             <label class="input-label mb-0">{{ t('admin.accounts.openai.compactMode') }}</label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2387,7 +2387,7 @@
             <Select v-model="openAICompactMode" :options="openAICompactModeOptions" />
           </div>
         </div>
-        <div class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300">
+        <div v-if="account?.platform === 'openai'" class="rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300">
           <span class="font-medium">{{ t(openAICompactStatusKey) }}</span>
           <span
             v-if="account?.extra?.openai_compact_checked_at"
@@ -2399,7 +2399,7 @@
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.openai.compactModelMapping') }}</label>
-          <p class="input-hint">{{ t('admin.accounts.openai.compactModelMappingDesc') }}</p>
+          <p class="input-hint">{{ t(account?.platform === 'grok' ? 'admin.accounts.grok.compactModelMappingDesc' : 'admin.accounts.openai.compactModelMappingDesc') }}</p>
           <div v-if="openAICompactModelMappings.length > 0" class="mb-3 space-y-2">
             <div
               v-for="(mapping, index) in openAICompactModelMappings"
@@ -2409,6 +2409,7 @@
               <input
                 v-model="mapping.from"
                 type="text"
+                data-testid="compact-model-mapping-from"
                 class="input flex-1"
                 :placeholder="t('admin.accounts.fromModel')"
               />
@@ -2416,6 +2417,7 @@
               <input
                 v-model="mapping.to"
                 type="text"
+                data-testid="compact-model-mapping-to"
                 class="input flex-1"
                 :placeholder="t('admin.accounts.toModel')"
               />
@@ -2424,7 +2426,7 @@
               </button>
             </div>
           </div>
-          <button type="button" @click="addOpenAICompactModelMapping" class="btn btn-secondary text-sm">
+          <button type="button" data-testid="compact-model-mapping-add" @click="addOpenAICompactModelMapping" class="btn btn-secondary text-sm">
             + {{ t('admin.accounts.addMapping') }}
           </button>
         </div>
@@ -4246,6 +4248,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       openAICompactModelMappings.value = Object.entries(compactMappings).map(([from, to]) => ({ from, to }))
     }
   }
+  if (newAccount.platform === 'grok') {
+    const compactMappings = newAccount.credentials?.compact_model_mapping as Record<string, string> | undefined
+    if (compactMappings && typeof compactMappings === 'object') {
+      openAICompactModelMappings.value = Object.entries(compactMappings).map(([from, to]) => ({ from, to }))
+    }
+  }
   if (newAccount.platform === 'anthropic' && newAccount.type === 'apikey') {
     anthropicPassthroughEnabled.value = extra?.anthropic_passthrough === true
     anthropicAPIKeyAuthScheme.value = extra?.anthropic_apikey_auth_scheme === 'authorization_bearer'
@@ -5102,6 +5110,12 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   try {
+    if (props.account?.platform === 'grok') {
+      updatePayload.credentials = {
+        ...((updatePayload.credentials as Record<string, unknown>) || {}),
+        compact_model_mapping: buildModelMappingObject('mapping', [], openAICompactModelMappings.value) ?? {}
+      }
+    }
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
     updatedAccount = await persistGrokMediaEligibility(accountID, updatedAccount)
     appStore.showSuccess(t('admin.accounts.accountUpdated'))

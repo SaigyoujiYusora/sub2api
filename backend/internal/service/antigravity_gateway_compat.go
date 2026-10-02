@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type antigravityCompatProtocol uint8
@@ -106,6 +107,27 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 	body []byte,
 	_ *ParsedRequest,
 ) (*ForwardResult, error) {
+	if err := s.validateAntigravityCompatAccount(c, account); err != nil {
+		return nil, err
+	}
+	expanded, _, err := ExpandPortableCompactionInputs(body, false)
+	if err != nil {
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+	}
+	if isPortableCompactionRequest(c, expanded) {
+		model := account.GetMappedModel(gjson.GetBytes(body, "model").String())
+		result, err := forwardPortableCompaction(ctx, c, expanded, model, func(innerCtx context.Context, inner *gin.Context, summary []byte) (*ForwardResult, error) {
+			return s.forwardAsResponses(innerCtx, inner, account, summary)
+		})
+		if result != nil {
+			result.Stream = gjson.GetBytes(body, "stream").Bool()
+		}
+		return result, err
+	}
+	return s.forwardAsResponses(ctx, c, account, expanded)
+}
+
+func (s *AntigravityGatewayService) forwardAsResponses(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
 	if err := s.validateAntigravityCompatAccount(c, account); err != nil {
 		return nil, err
 	}

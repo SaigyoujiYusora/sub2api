@@ -1201,7 +1201,7 @@
       </div>
 
       <!-- OpenAI Compact model mapping -->
-      <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allCompactMappingCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1212,7 +1212,7 @@
               {{ t('admin.accounts.openai.compactModelMapping') }}
             </label>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {{ t('admin.accounts.openai.compactModelMappingDesc') }}
+              {{ t(targetSelectedPlatforms.includes('grok') ? 'admin.accounts.grok.compactModelMappingDesc' : 'admin.accounts.openai.compactModelMappingDesc') }}
             </p>
           </div>
           <input
@@ -1572,6 +1572,13 @@ const allOpenAIOAuth = computed(() => {
     targetSelectedTypes.value.every(t => t === 'oauth' || t === 'setup-token')
   )
 })
+
+const allCompactMappingCapable = computed(() =>
+  targetSelectedPlatforms.value.length > 0 &&
+  targetSelectedPlatforms.value.every(p => p === 'openai' || p === 'grok') &&
+  targetSelectedTypes.value.length > 0 &&
+  targetSelectedTypes.value.every(t => t === 'oauth' || t === 'setup-token' || t === 'apikey')
+)
 
 // 严格 OAuth（不含 setup-token）：namespace 摊平兼容开关只对 OAuth 账号生效
 const allOpenAIOAuthOnly = computed(() => {

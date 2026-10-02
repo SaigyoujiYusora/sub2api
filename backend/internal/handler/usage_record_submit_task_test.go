@@ -160,6 +160,21 @@ func TestOpenAIGatewayHandlerSubmitMandatoryUsageRecordTask_DroppedTaskSyncFallb
 	require.True(t, called.Load(), "mandatory usage task must run synchronously when async submit is dropped")
 }
 
+func TestPortableCompactionSummaryBillingCannotDrop(t *testing.T) {
+	pool := service.NewUsageRecordWorkerPoolWithOptions(service.UsageRecordWorkerPoolOptions{WorkerCount: 1, QueueSize: 1, TaskTimeout: time.Second, OverflowPolicy: "drop", OverflowSamplePercent: 0})
+	t.Cleanup(pool.Stop)
+	h := &OpenAIGatewayHandler{usageRecordWorkerPool: pool}
+	started, release := make(chan struct{}), make(chan struct{})
+	pool.Submit(func(context.Context) { close(started); <-release })
+	<-started
+	defer close(release)
+	pool.Submit(func(context.Context) {})
+	ctx := service.WithPortableSummaryScope(context.Background(), service.PortableSummaryScope{UserID: 1, APIKeyID: 2})
+	var count atomic.Int32
+	h.submitOpenAIUsageRecordTask(ctx, &service.OpenAIForwardResult{}, func(context.Context) { count.Add(1) })
+	require.EqualValues(t, 1, count.Load())
+}
+
 func TestOpenAIGatewayHandlerSubmitOpenAIUsageRecordTask_ImageResultUsesMandatoryFallback(t *testing.T) {
 	pool := service.NewUsageRecordWorkerPoolWithOptions(service.UsageRecordWorkerPoolOptions{
 		WorkerCount:           1,
