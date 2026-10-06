@@ -253,7 +253,21 @@ func (s *OpenAIGatewayService) forwardResponses(ctx context.Context, c *gin.Cont
 	if account.IsOpenAIApiKey() && !compactPath && isOfficialCommandCodeHost(account.GetOpenAIBaseURL()) {
 		body = apicompat.NormalizeCodexAgentMessagesForResponses(body)
 		body = dropCommandCodeUnansweredToolCalls(body)
+		// Command Code rejects some long DeepSeek custom-tool histories even
+		// when the same content succeeds as function tools. Keep Responses and
+		// lower both definitions and replay items; restore calls on the way out.
+		mappedModel := strings.ToLower(strings.TrimSpace(account.GetMappedModel(reqModel)))
+		if (strings.HasPrefix(mappedModel, "deepseek/") || strings.HasPrefix(mappedModel, "deepseek-")) &&
+			wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 && needsOpenAIResponsesClientToolAdaptation(body) {
+			adapted, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
+			if adaptErr != nil {
+				return nil, fmt.Errorf("adapt Command Code DeepSeek Responses client tools: %w", adaptErr)
+			}
+			body = adapted
+			setOpenAIResponsesClientToolMapping(c, mapping)
+		}
 		originalBody = body
+		requestView = newOpenAIRequestView(body)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
 	if account.IsOpenAI() && (account.IsOpenAIApiKey() || account.IsOpenAIOAuthLike()) {
